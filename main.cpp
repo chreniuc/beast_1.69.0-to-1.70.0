@@ -3,11 +3,10 @@ class::class(
   ::boost::asio::io_context& ioc,
   ::boost::asio::io_context& main_context,
   ::boost::asio::ssl::context& ctx)
-  : ctx(ctx), acceptor(main_context), socket(ioc)
+  : ctx(ctx), acceptor(main_context), socket(::boost::asio::make_strand(ioc)), rw_ioc(ioc)
 {
-
  // main_context is used only for accepting connections
- // ioc is used for write and read operations
+ // rw_ioc is used for write and read operations, save it as a refence to pass it to make_strand
  
  // load server certificates
  // prepare acceptor
@@ -26,15 +25,11 @@ void class::on_socket_accept(boost::system::error_code ec)
 std::shared_ptr<connection> connection =
   std::make_shared<connection>();
 
-connection->ws = std::make_shared< boost::beast::websocket::stream<
-  boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>>(
-  std::move(socket), ctx);
-
-connection->strand = std::make_shared<
-  boost::asio::strand<boost::asio::io_context::executor_type>>(
-  connection->ws->get_executor());
+connection->ws = std::make_shared< websocket::stream<beast::ssl_stream<
+   beast::tcp_stream>>>(std::move(socket), ctx);
 
 do_handshake(connection);
+socket = boost::asio::ip::tcp::socket(boost::asio::make_strand(rw_ioc));
 
 // Accept another connection
 acceptor.async_accept(
@@ -47,16 +42,16 @@ acceptor.async_accept(
 //----------------------------------------------------------------------------//
 void class::do_handshake(const connection_ptr& connection)
 {
+  connection->ws.set_option(
+    websocket::stream_base::timeout::suggested(beast::role_type::server));
   // do handshake
   conn_ptr->ws->next_layer().async_handshake(
     boost::asio::ssl::stream_base::server,
-    boost::asio::bind_executor(
-      *connection->strand,
       std::bind(
         &class::on_handshake,
         this,
         connection,
-        std::placeholders::_1)));
+        std::placeholders::_1));
 }
 //----------------------------------------------------------------------------//
 void class::on_handshake(const connection_ptr& connection,
@@ -65,13 +60,11 @@ void class::on_handshake(const connection_ptr& connection,
   // ... handle error
   // Accept the websocket handshake
   conn_ptr->ws->async_accept(
-    boost::asio::bind_executor(
-      *connection->strand,
       std::bind(
         &class::on_accept,
         this,
         connection,
-        std::placeholders::_1)));
+        std::placeholders::_1));
 }
 //----------------------------------------------------------------------------//
 void class::on_accept(const connection_ptr& connection,
@@ -88,15 +81,13 @@ void class::do_read(const connection_ptr& connection)
     std::make_shared<boost::beast::flat_buffer>();
   connection->ws->async_read(
     *message_ptr,
-    boost::asio::bind_executor(
-      *connection->strand,
       std::bind(
         &class::on_read,
         this,
         connection,
         message_ptr,
         std::placeholders::_1,
-        std::placeholders::_2)));
+        std::placeholders::_2));
 }
 //----------------------------------------------------------------------------//
 void class::on_read(const connection_ptr& connection,
@@ -112,15 +103,13 @@ void class::do_write(const connection_ptr& connection,
 {
   connection->ws->async_write(
     boost::asio::buffer(*message_ptr),
-    boost::asio::bind_executor(
-      *connection->strand,
       std::bind(
         &class::on_write,
         this,
         connection,
         message_ptr,
         std::placeholders::_1,
-        std::placeholders::_2 )));
+        std::placeholders::_2 ));
 }
 //----------------------------------------------------------------------------//
 void class::on_write(const connection_ptr& connection,
@@ -136,14 +125,12 @@ void class::do_close(const connection_ptr& connection,
 {
   connection->ws->async_close(
     boost::beast::websocket::close_reason("reason"),
-    boost::asio::bind_executor(
-      *connection->strand,
       std::bind(
         &class::on_close,
         this,
         connection,
         message_ptr,
-        std::placeholders::_1)));
+        std::placeholders::_1));
 }
 //----------------------------------------------------------------------------//
 void class::on_close(const connection_ptr& connection,
